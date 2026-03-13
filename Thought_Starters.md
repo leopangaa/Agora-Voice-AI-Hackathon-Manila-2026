@@ -63,7 +63,7 @@ The agent reads `AGENT.md`, installs dependencies, asks for your API keys, confi
 Optional — gives TRAE IDE built-in knowledge of all Agora products (RTC, RTM, ConvoAI, Cloud Recording), token generation, and more:
 
 ```bash
-npx skills add github:AgoraIO-Conversational-AI/agora-skills
+npx skills add github:agoraio/skills
 ```
 
 ## What You'll Need

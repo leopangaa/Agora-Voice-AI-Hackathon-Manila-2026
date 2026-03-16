@@ -8,6 +8,14 @@ import { SettingsScreen } from './components/SettingsScreen';
 import { TalkButton } from './components/TalkButton';
 import { NavButton } from './components/NavButton';
 
+// Global state to survive React Strict Mode remounts in development
+let globalInitDone = false;
+let globalClient = null;
+
+// Configure Agora SDK globally to silence telemetry noise
+AgoraRTC.setLogLevel(2); // 2 is WARNING, 4 is NONE. Silence DEBUG/INFO.
+AgoraRTC.disableLogUpload(); // Stop sending logs to Agora servers
+
 function App() {
   const [activeTab, setActiveTab] = useState('main');
   const [appState, setAppState] = useState('idle');
@@ -25,42 +33,57 @@ function App() {
   const [agoraError, setAgoraError] = useState(null);
   const [userVolume, setUserVolume] = useState(0);
 
-  const client = useRef(null);
+  const client = useRef(globalClient);
   const localAudioTrack = useRef(null);
   const logsEndRef = useRef(null);
   const transcriptsEndRef = useRef(null);
   const volumeInterval = useRef(null);
   const processingTimeout = useRef(null);
+  const userUidRef = useRef(null);
 
   useEffect(() => {
+    // Only initialize once, even if Strict Mode remounts the component
+    if (globalInitDone) {
+      if (globalClient && (globalClient.connectionState === 'CONNECTED' || globalClient.connectionState === 'CONNECTING')) {
+        addLog("Component remounted. Reusing existing connection...");
+        setStatusFlags(prev => ({ ...prev, agora: true }));
+      }
+      return;
+    }
+    
+    globalInitDone = true;
     initAgora();
 
     return () => {
-      if (localAudioTrack.current) {
-        localAudioTrack.current.close();
-      }
-      if (client.current) {
-        client.current.leave();
-      }
+      // In development (Strict Mode), don't leave on remount
     };
   }, []);
 
   const initAgora = async () => {
+    // If we're already connecting, don't start again.
+    if (client.current && (client.current.connectionState === 'CONNECTING' || client.current.connectionState === 'CONNECTED')) {
+      addLog(`Already ${client.current.connectionState}. Skipping initialization.`);
+      return;
+    }
+
     setAgoraError(null);
     setStatusFlags(prev => ({ ...prev, agora: false }));
     
+    // Cleanup if existing client exists
     if (client.current) {
       try {
         await client.current.leave();
-      } catch (e) {}
+      } catch (e) {
+        // Silent fail
+      }
     }
     
-    client.current = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+    globalClient = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+    client.current = globalClient;
     
     try {
-      addLog(`App started with Agora ID: ${AGORA_CONFIG.APP_ID.substring(0, 4)}...`);
+      addLog(`Connecting to Agora (App ID: ${AGORA_CONFIG.APP_ID.substring(0, 4)}...)`);
       addLog(`Channel: ${AGORA_CONFIG.CHANNEL}`);
-      addLog(`Agent IDs: Empath=${AGORA_CONFIG.AGENTS.empath}, Strategist=${AGORA_CONFIG.AGENTS.strategist}, Stoic=${AGORA_CONFIG.AGENTS.stoic}`);
       
       if (!AGORA_CONFIG.APP_ID) {
         const err = 'AGORA_APP_ID is missing in .env';
@@ -71,11 +94,81 @@ function App() {
 
       // No need to set role for RTC mode; all users are broadcasters by default.
       
-      addLog(`Attempting to join channel: ${AGORA_CONFIG.CHANNEL}`);
+      addLog(`Attempting to join channel...`);
       const userUid = await client.current.join(AGORA_CONFIG.APP_ID, AGORA_CONFIG.CHANNEL, AGORA_CONFIG.TOKEN || null, null);
-      addLog(`Successfully joined Agora channel with UID: ${userUid}`);
+      userUidRef.current = userUid;
+      addLog(`Successfully joined with UID: ${userUid}`);
       setStatusFlags(prev => ({ ...prev, agora: true }));
       setAgoraError(null);
+
+      // Log current users in channel right after joining
+      const currentUsers = client.current.remoteUsers.map(u => u.uid);
+      addLog(`Initial users in channel: [${currentUsers.join(', ')}]`);
+
+      // --- Debug Listeners Start ---
+      client.current.on('connection-state-change', (curState, prevState, reason) => {
+        addLog(`Agora Connection: ${prevState} -> ${curState} (Reason: ${reason || 'none'})`);
+        if (curState === 'DISCONNECTED' && reason !== 'LEAVE') {
+           setAgoraError(`Disconnected: ${reason || 'Connection lost'}`);
+        }
+      });
+
+      client.current.on('user-joined', (user) => {
+        addLog(`Remote user JOINED: UID=${user.uid}`);
+        const currentUsers = client.current.remoteUsers.map(u => u.uid);
+        addLog(`Current users in channel: [${currentUsers.join(', ')}]`);
+      });
+
+      client.current.on('user-left', (user) => {
+        addLog(`Remote user LEFT: UID=${user.uid}`);
+        const currentUsers = client.current.remoteUsers.map(u => u.uid);
+        addLog(`Current users in channel: [${currentUsers.join(', ')}]`);
+      });
+      // --- Debug Listeners End ---
+
+      // Listen for data messages (transcripts) from AI agents
+      client.current.on("stream-message", (uid, data) => {
+        try {
+          const decoder = new TextDecoder();
+          const text = decoder.decode(data);
+          const senderId = String(uid);
+          addLog(`Message from ${senderId}: ${text}`);
+
+          let role = 'unknown';
+          if (senderId === String(AGORA_CONFIG.AGENTS.empath)) role = 'empath';
+          else if (senderId === String(AGORA_CONFIG.AGENTS.strategist)) role = 'strategist';
+          else if (senderId === String(AGORA_CONFIG.AGENTS.stoic)) role = 'stoic';
+          else if (senderId === String(userUidRef.current)) role = 'user';
+
+          if (role !== 'unknown') {
+            setTranscripts(prev => {
+              // For user role, we might want to update or add
+              // For agents, we update the placeholder '...'
+              const last = prev[prev.length - 1];
+              if (last && last.role === role && (last.text === '...' || role === 'user')) {
+                const newTranscripts = [...prev];
+                newTranscripts[newTranscripts.length - 1] = { role, text };
+                return newTranscripts;
+              }
+              return [...prev, { role, text }];
+            });
+            
+            // Update pipeline status flags based on received text
+            if (role !== 'user') {
+              setStatusFlags(prev => ({ 
+                ...prev, 
+                stt: true, 
+                ai: true, 
+                tts: true 
+              }));
+            } else {
+              setStatusFlags(prev => ({ ...prev, stt: true }));
+            }
+          }
+        } catch (err) {
+          addLog(`Error decoding stream message: ${err.message}`);
+        }
+      });
 
       client.current.on('user-published', async (user, mediaType) => {
         addLog(`User published: UID=${user.uid}, mediaType=${mediaType}`);
@@ -185,15 +278,18 @@ function App() {
     }
     setAppState('recording');
     setActiveSpeaker('user');
-    addLog('Requesting microphone access...');
+    addLog('DEBUG: Requesting microphone access...');
     setStatusFlags(prev => ({ ...prev, audioCaptured: true, stt: false, ai: false, tts: false, spatial: false }));
     setTranscripts([]);
 
     try {
+      addLog("DEBUG: Calling AgoraRTC.createMicrophoneAudioTrack()...");
       localAudioTrack.current = await AgoraRTC.createMicrophoneAudioTrack();
-      addLog('Microphone access granted. Publishing audio...');
+      addLog('DEBUG: Microphone access granted. Track created.');
+      
+      addLog(`DEBUG: Calling client.publish()...`);
       await client.current.publish(localAudioTrack.current);
-      addLog('Audio published to channel.');
+      addLog('DEBUG: API Call success (publish). Audio live.');
 
       // Monitor volume levels
       volumeInterval.current = setInterval(() => {
@@ -204,7 +300,7 @@ function App() {
       }, 100);
 
     } catch (error) {
-      addLog(`Mic error: ${error.message}`);
+      addLog(`DEBUG: API Call Error (publish/mic): ${error.message}`);
       setAppState('idle');
       setActiveSpeaker(null);
     }
@@ -223,21 +319,24 @@ function App() {
 
     if (localAudioTrack.current) {
       try {
-        addLog('Unpublishing and closing local audio...');
+        addLog('DEBUG: Calling client.unpublish()...');
         await client.current.unpublish(localAudioTrack.current);
+        addLog('DEBUG: unpublish() success.');
+        
+        addLog('DEBUG: Closing local audio track...');
         localAudioTrack.current.stop();
         localAudioTrack.current.close();
         localAudioTrack.current = null;
-        addLog('Local audio track closed.');
+        addLog('DEBUG: Track closed.');
       } catch (error) {
-        addLog(`Error closing track: ${error.message}`);
+        addLog(`DEBUG: API Call Error (unpublish/close): ${error.message}`);
       }
     }
 
     // Transition to 'processing' state.
     setAppState('processing');
     setActiveSpeaker(null);
-    addLog('Speech processing (waiting for AI response)...');
+    addLog('User stopped talking. Agents are now synthesizing response...');
 
     // Set a safety timeout to reset back to 'idle' if AI doesn't respond in 15s
     if (processingTimeout.current) clearTimeout(processingTimeout.current);
@@ -302,7 +401,7 @@ function App() {
                         userVolume={userVolume}
                         agoraConnected={statusFlags.agora}
                         agoraError={agoraError}
-                        onRetry={initAgora}
+                        onRetry={() => initAgora(true)}
                       />
             </div>
           </div>

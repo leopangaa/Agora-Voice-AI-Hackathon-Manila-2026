@@ -27,6 +27,8 @@ export function TalkButton({ appState, onPressStart, onPressEnd, activeSpeaker, 
     icon = (
       <div className="relative flex items-center justify-center">
         <div className="w-8 h-8 rounded-[8px] bg-white animate-pulse shadow-sm z-10" />
+        {/* Scanning beam effect */}
+        <div className="absolute inset-[-100%] bg-gradient-to-t from-red-500/0 via-red-500/30 to-red-500/0 animate-[scan_1s_linear_infinite]" />
         {/* Volume ring indicator */}
         <div 
           className="absolute rounded-full border-4 border-white/30 transition-all duration-100"
@@ -73,7 +75,7 @@ export function TalkButton({ appState, onPressStart, onPressEnd, activeSpeaker, 
           onTouchStart={agoraError ? null : onPressStart}
           onTouchEnd={agoraError ? null : onPressEnd}
           onClick={agoraError ? onRetry : null}
-          disabled={appState === 'processing' || appState === 'speaking'}
+          disabled={appState === 'processing' || appState === 'speaking' || (!agoraConnected && !agoraError)}
         >
           <div className="absolute inset-0 rounded-full bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
           

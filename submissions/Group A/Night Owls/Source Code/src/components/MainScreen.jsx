@@ -55,6 +55,16 @@ export function MainScreen({ appState, activeSpeaker, transcripts, statusFlags, 
         )}
 
         <div className="flex flex-col gap-4">
+          {appState === 'recording' && (
+            <div className="flex items-center justify-center py-6 text-red-500 space-x-3 bg-red-50/50 backdrop-blur-md rounded-[28px] border-2 border-red-100/50 shadow-inner animate-in fade-in zoom-in duration-300 relative overflow-hidden group">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-red-200/20 to-transparent -translate-x-full group-hover:animate-[hologram_2s_linear_infinite]" />
+              <div className="relative">
+                <Mic size={20} className="animate-pulse" />
+                <div className="absolute inset-0 bg-red-400 rounded-full animate-ping opacity-20" />
+              </div>
+              <span className="text-[13px] font-bold tracking-widest uppercase">Scanning Voice...</span>
+            </div>
+          )}
           {transcripts.map((msg, idx) => (
             <TranscriptCard key={idx} role={msg.role} text={msg.text} />
           ))}
